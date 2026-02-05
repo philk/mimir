@@ -375,7 +375,9 @@ const oooChunkIDMask = 1 << 23
 // * pos == len(s.oooMmappedChunks) refers to s.oooHeadChunk
 // The caller must ensure that s.ooo is not nil.
 func (s *memSeries) oooHeadChunkID(pos int) chunks.HeadChunkID {
-	return (chunks.HeadChunkID(pos) + s.ooo.firstOOOChunkID) | oooChunkIDMask
+	// Chunk refs pack only 23 bits of chunk ID for OOO chunks, with bit 23 reserved as the "is OOO" marker.
+	// The chunk ID must therefore wrap in a 23-bit ring.
+	return ((chunks.HeadChunkID(pos) + s.ooo.firstOOOChunkID) & (oooChunkIDMask - 1)) | oooChunkIDMask
 }
 
 func unpackHeadChunkRef(ref chunks.ChunkRef) (seriesID chunks.HeadSeriesRef, chunkID chunks.HeadChunkID, isOOO bool) {
@@ -602,16 +604,26 @@ func (s *memSeries) chunk(id chunks.HeadChunkID, chunkDiskMapper *chunks.ChunkDi
 // oooChunk returns the chunk for the HeadChunkID by m-mapping it from the disk.
 // It never returns the head OOO chunk.
 func (s *memSeries) oooChunk(id chunks.HeadChunkID, chunkDiskMapper *chunks.ChunkDiskMapper, _ *sync.Pool) (chunk chunkenc.Chunk, maxTime int64, err error) {
-	// ix represents the index of chunk in the s.ooo.oooMmappedChunks slice. The chunk id's are
-	// incremented by 1 when new chunk is created, hence (id - firstOOOChunkID) gives the slice index.
-	ix := int(id) - int(s.ooo.firstOOOChunkID)
+	// ix represents the index of chunk in the s.ooo.oooMmappedChunks slice.
+	//
+	// OOO chunk IDs are packed in 23 bits (bit 23 is reserved as an "is OOO" marker in head chunk refs),
+	// so the ID space wraps in a 23-bit ring.
+	maskedFirst := s.ooo.firstOOOChunkID & (oooChunkIDMask - 1)
+	maskedID := id & (oooChunkIDMask - 1)
+	var ix chunks.HeadChunkID
+	if maskedID >= maskedFirst {
+		ix = maskedID - maskedFirst
+	} else {
+		ix = maskedID + chunks.HeadChunkID(oooChunkIDMask) - maskedFirst
+	}
 
-	if ix < 0 || ix >= len(s.ooo.oooMmappedChunks) {
+	if ix >= chunks.HeadChunkID(len(s.ooo.oooMmappedChunks)) {
 		return nil, 0, storage.ErrNotFound
 	}
 
-	chk, err := chunkDiskMapper.Chunk(s.ooo.oooMmappedChunks[ix].ref)
-	return chk, s.ooo.oooMmappedChunks[ix].maxTime, err
+	mc := s.ooo.oooMmappedChunks[ix]
+	chk, err := chunkDiskMapper.Chunk(mc.ref)
+	return chk, mc.maxTime, err
 }
 
 // safeHeadChunk makes sure that the chunk can be accessed without a race condition.

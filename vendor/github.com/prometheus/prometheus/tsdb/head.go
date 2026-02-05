@@ -2606,7 +2606,9 @@ func (s *memSeries) truncateChunksBefore(mint int64, minOOOMmapRef chunks.ChunkD
 			removedOOO = i + 1
 		}
 		s.ooo.oooMmappedChunks = append(s.ooo.oooMmappedChunks[:0], s.ooo.oooMmappedChunks[removedOOO:]...)
-		s.ooo.firstOOOChunkID += chunks.HeadChunkID(removedOOO)
+		// OOO chunk IDs are packed in 23 bits, with bit 23 reserved for the "is OOO" marker.
+		// Keep the base chunk ID wrapped in the same 23-bit ring.
+		s.ooo.firstOOOChunkID = (s.ooo.firstOOOChunkID + chunks.HeadChunkID(removedOOO)) & (oooChunkIDMask - 1)
 
 		if len(s.ooo.oooMmappedChunks) == 0 && s.ooo.oooHeadChunk == nil {
 			s.ooo = nil
